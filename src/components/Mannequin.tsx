@@ -13,6 +13,8 @@ export interface Outfit {
   topKind: "shirt" | "sweat" | "tee";
   sleeve: "long" | "short";
   jacketColor: string | null;
+  vestColor: string | null;
+  tieColor: string | null;
   bottomColor: string;
   jeans: boolean;
   shoeColor: string;
@@ -36,6 +38,7 @@ const DIST = 4.6;
 const PHI = Math.PI / 2 - 0.035;
 const TARGET: [number, number, number] = [0, 0.9, 0];
 const HIP_Y = 0.92;
+const VEST_OFF = 0.03;
 const TAU = Math.PI * 2;
 
 // Torso silhouette as [height, radius], crotch to neck. Depth is the same profile squashed by Z_SCALE.
@@ -77,6 +80,64 @@ function band(y0: number, y1: number, offset: number, closeBottom = false, hipFl
 // Point on the front surface of the squashed torso at height y.
 function frontZ(y: number, offset: number) {
   return (torsoR(y) + offset) * Z_SCALE;
+}
+
+// Torso shell whose front opening widens with height, giving a V neckline (waistcoat).
+function vNeckShell(y0: number, y1: number, offset: number, vFrom: number, vMax: number) {
+  const rows = 40;
+  const cols = 72;
+  const pos: number[] = [];
+  const idx: number[] = [];
+  for (let i = 0; i <= rows; i++) {
+    const y = y0 + ((y1 - y0) * i) / rows;
+    const r = torsoR(y) + offset;
+    const gap = 0.02 + (y > vFrom ? ((y - vFrom) / (y1 - vFrom)) * vMax : 0);
+    for (let j = 0; j <= cols; j++) {
+      const phi = gap + ((TAU - 2 * gap) * j) / cols;
+      pos.push(r * Math.sin(phi), y, r * Math.cos(phi));
+    }
+  }
+  for (let i = 0; i < rows; i++) {
+    for (let j = 0; j < cols; j++) {
+      const a = i * (cols + 1) + j;
+      const b = a + cols + 1;
+      idx.push(a, b, a + 1, a + 1, b, b + 1);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+// Tie blade lying on the shirt front, widening from the knot to a point.
+function tieBlade(offset: number) {
+  const top = 1.465;
+  const bottom = 1.0;
+  const steps = 30;
+  const pos: number[] = [];
+  const idx: number[] = [];
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const y = top - (top - bottom) * t;
+    const w = 0.012 + 0.026 * t;
+    const z = frontZ(y, offset);
+    pos.push(-w, y, z, w, y, z);
+  }
+  const tipY = bottom - 0.035;
+  pos.push(0, tipY, frontZ(tipY, offset));
+  for (let i = 0; i < steps; i++) {
+    const a = i * 2;
+    idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3);
+  }
+  const last = steps * 2;
+  idx.push(last, last + 2, last + 1);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
 }
 
 function shade(hex: string, amount: number) {
@@ -172,6 +233,9 @@ function Torso({ o }: { o: Outfit }) {
   const belt = useMemo(() => band(0.955, 0.99, beltOff), [beltOff]);
   const rib = useMemo(() => band(0.87, 0.905, shirtOff + 0.005), [shirtOff]);
   const jacket = useMemo(() => [...band(0.8, 1.49, 0.042, false, true), new THREE.Vector2(0.09, 1.515)], []);
+  const vest = useMemo(() => vNeckShell(0.93, 1.45, VEST_OFF, 1.16, 0.95), []);
+  const tie = useMemo(() => tieBlade(shirtOff + 0.005), [shirtOff]);
+  const showTie = tucked && o.tieColor;
 
   return (
     <group>
@@ -200,6 +264,11 @@ function Torso({ o }: { o: Outfit }) {
             <Mat color={shade(o.topColor, 0.9)} roughness={0.95} />
           </mesh>
         )}
+        {o.vestColor && (
+          <mesh geometry={vest}>
+            <Mat color={o.vestColor} roughness={0.68} sheen={0.4} />
+          </mesh>
+        )}
         {o.jacketColor && (
           <mesh>
             <latheGeometry args={[jacket, 72, 0.3, TAU - 0.6]} />
@@ -208,7 +277,40 @@ function Torso({ o }: { o: Outfit }) {
         )}
       </group>
 
-      {tucked && (
+      {showTie && (
+        <>
+          <mesh geometry={tie}>
+            <Mat color={o.tieColor!} roughness={0.42} sheen={0.25} />
+          </mesh>
+          <RoundedBox args={[0.034, 0.03, 0.02]} radius={0.008} smoothness={3} position={[0, 1.483, frontZ(1.483, shirtOff) + 0.012]}>
+            <Mat color={o.tieColor!} roughness={0.42} sheen={0.25} />
+          </RoundedBox>
+        </>
+      )}
+
+      {o.vestColor && (
+        <>
+          {[0.97, 1.03, 1.09, 1.15].map((y) => (
+            <mesh key={y} position={[0, y, frontZ(y, VEST_OFF) + 0.003]} scale={[1, 1, 0.5]}>
+              <sphereGeometry args={[0.008, 12, 8]} />
+              <Mat color="#4B4B50" roughness={0.3} sheen={0} />
+            </mesh>
+          ))}
+          {[-1, 1].map((s) => {
+            const r = torsoR(1.02) + VEST_OFF;
+            const x = 0.1;
+            const z = r * Z_SCALE * Math.sqrt(1 - (x / r) ** 2) + 0.002;
+            return (
+              <mesh key={s} position={[s * x, 1.02, z]} rotation={[0, s * 0.55, 0]}>
+                <boxGeometry args={[0.06, 0.008, 0.004]} />
+                <Mat color={shade(o.vestColor!, 0.7)} roughness={0.7} sheen={0} />
+              </mesh>
+            );
+          })}
+        </>
+      )}
+
+      {tucked && !o.vestColor && (
         <group position={[0, 0.972, frontZ(0.972, beltOff) + 0.004]}>
           <RoundedBox args={[0.05, 0.042, 0.01]} radius={0.004} smoothness={3}>
             <Mat color={METAL} roughness={0.25} metalness={0.9} sheen={0} />
